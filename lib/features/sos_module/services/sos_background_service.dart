@@ -27,6 +27,7 @@ const String kSosModuleChannelId = 'sos_module_channel';
 class SosBackgroundService {
   const SosBackgroundService();
 
+
   /// Configure the service. Call once at startup (e.g. in `main`).
   /// Does NOT auto-start — the service starts only when an SOS begins.
   static Future<void> configure() async {
