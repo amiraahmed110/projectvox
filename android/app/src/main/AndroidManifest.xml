@@ -13,6 +13,20 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
 
+    <!-- Android 11+ package visibility so url_launcher can open the SMS
+         composer / dialer. No SEND_SMS permission: we open the messaging app
+         and the user taps send. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.SENDTO"/>
+            <data android:scheme="sms"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.DIAL"/>
+            <data android:scheme="tel"/>
+        </intent>
+    </queries>
+
     <application
         android:label="vox_guard"
         android:name="${applicationName}"

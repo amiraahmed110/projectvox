@@ -36,6 +36,22 @@
     <key>NSMicrophoneUsageDescription</key>
     <string>VoxGuard records audio evidence during an emergency SOS.</string>
 
+    <!-- Allow audio recording + location tracking to continue when the app is
+         backgrounded/locked (used by the SOS background service). -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>audio</string>
+        <string>location</string>
+        <string>fetch</string>
+        <string>processing</string>
+    </array>
+    <!-- Let url_launcher detect/open the SMS composer and dialer. -->
+    <key>LSApplicationQueriesSchemes</key>
+    <array>
+        <string>sms</string>
+        <string>tel</string>
+    </array>
+
     <key>UIApplicationSceneManifest</key>
     <dict>
         <key>UIApplicationSupportsMultipleScenes</key>
