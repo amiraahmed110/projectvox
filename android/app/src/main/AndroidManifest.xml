@@ -13,6 +13,7 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
 
+
     <!-- Android 11+ package visibility so url_launcher can open the SMS
          composer / dialer. No SEND_SMS permission: we open the messaging app
          and the user taps send. -->
