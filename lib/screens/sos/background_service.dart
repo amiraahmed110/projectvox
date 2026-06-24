@@ -13,6 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../config/api_config.dart';
 import 'ai_monitor.dart';
+import 'sos_service.dart';
 
 /// SharedPreferences key holding the rolling background diagnostic log.
 /// Single source of truth shared with the in-app log viewer.
@@ -70,6 +71,8 @@ void onStart(ServiceInstance service) async {
   bool processingChunk = false; // لمنع تداخل معالجة المقاطع
   int locationPoints = 0;
   String lastLocationText = '';
+  double? lastLat; // آخر إحداثيات معروفة — لفحص المناطق الآمنة في مراقبة ما قبل الـ SOS
+  double? lastLng;
 
   // يبدأ تسجيل مقطع جديد (مدة المقطع يحكمها مؤقّت الـ 2 دقيقة).
   Future<void> startChunk() async {
@@ -135,17 +138,19 @@ void onStart(ServiceInstance service) async {
     }
   }
 
-  // الاستماع للأحداث (SOS): بدء تسجيل الصوت وتفعيل تسجيل الموقع في الخلفية.
-  service.on('startSOS').listen((event) async {
-    if (event == null) {
-      await _log('⚠️ startSOS received a null payload; ignoring.');
-      return;
-    }
-
-    sosId = event['sos_id'] as int?;
-    token = event['token'] as String?;
-    shareLocation = event['share_location'] ?? true;
-    recordAudio = event['record_audio'] ?? false;
+  // تفعيل جلسة SOS — يُستدعى من الواجهة (عبر startSOS) ومن المراقبة التلقائية في
+  // الخلفية على حدٍّ سواء: يضبط حالة الجلسة، يرفع علم النشاط، ويبدأ تسجيل/تحليل
+  // الصوت بالمقاطع. تسجيل الموقع يبدأ تلقائياً من مُستمع الموقع بمجرد ضبط sosId.
+  Future<void> activateSos({
+    required int? newSosId,
+    required String? newToken,
+    required bool newShareLocation,
+    required bool newRecordAudio,
+  }) async {
+    sosId = newSosId;
+    token = newToken;
+    shareLocation = newShareLocation;
+    recordAudio = newRecordAudio;
     locationPoints = 0;
 
     // علم يخبر مراقب الواجهة أن الـ SOS نشط فيتنحّى عن المايك.
@@ -155,12 +160,11 @@ void onStart(ServiceInstance service) async {
     // معرف سالب => جلسة وهمية (السيرفر غير متاح) فلا نرفع البيانات للسيرفر.
     final bool isMock = sosId != null && sosId! < 0;
 
-    // قيمة الجلسة المستلمة من الواجهة: تُسجَّل كاملة للتشخيص.
     await _log('📡 START | id=$sosId | mock=$isMock | '
         'share_location=$shareLocation | record_audio=$recordAudio | '
         'token=${token == null ? 'null' : 'present(len=${token!.length})'}');
 
-    // تسجيل حالة إذن المايك الفعلية على مستوى النظام (قيمة خلفية مهمة للتشخيص).
+    // تسجيل حالة إذن المايك الفعلية على مستوى النظام (قيمة تشخيصية مهمة).
     try {
       final micStatus = await Permission.microphone.status;
       await _log('🔐 mic permission status = $micStatus');
@@ -204,7 +208,165 @@ void onStart(ServiceInstance service) async {
     } else {
       await _log('🔇 record_audio=false; audio capture disabled this session.');
     }
+  }
+
+  // الاستماع لإشارة الـ SOS القادمة من الواجهة (تشغيل يدوي / ذكاء عند فتح
+  // التطبيق): تُمرَّر بيانات الجلسة الجاهزة فنفعّلها كما هي.
+  service.on('startSOS').listen((event) async {
+    if (event == null) {
+      await _log('⚠️ startSOS received a null payload; ignoring.');
+      return;
+    }
+    await activateSos(
+      newSosId: event['sos_id'] as int?,
+      newToken: event['token'] as String?,
+      newShareLocation: event['share_location'] ?? true,
+      newRecordAudio: event['record_audio'] ?? false,
+    );
   });
+
+  // يسجّل مقطعاً قصيراً للاستماع (مرحلة ما قبل الـ SOS) ويعيد مساره. يتوقّف مبكراً
+  // إذا بدأت جلسة SOS أو عاد التطبيق إلى المقدمة، كي يسلّم المايك للواجهة فوراً.
+  Future<String?> recordListenClip(Duration duration) async {
+    try {
+      if (!await Permission.microphone.isGranted) return null;
+
+      final dir = await getApplicationDocumentsDirectory();
+      final path =
+          '${dir.path}/presos_${DateTime.now().millisecondsSinceEpoch}.wav';
+      await audioRecorder.start(
+        const RecordConfig(
+          encoder: AudioEncoder.wav,
+          sampleRate: 16000,
+          numChannels: 1,
+        ),
+        path: path,
+      );
+
+      final prefs = await SharedPreferences.getInstance();
+      final sw = Stopwatch()..start();
+      while (sw.elapsed < duration) {
+        // إعادة تحميل القيم عبر العزلات لرصد تغيّر الحالة من واجهة المستخدم.
+        await prefs.reload();
+        if ((prefs.getBool(kSosActiveKey) ?? false) ||
+            (prefs.getBool(kAppForegroundKey) ?? false)) {
+          break;
+        }
+        await Future.delayed(const Duration(seconds: 1));
+      }
+
+      if (!await audioRecorder.isRecording()) return null;
+      return await audioRecorder.stop();
+    } catch (e) {
+      await _log('⚠️ pre-SOS listen clip error: $e');
+      try {
+        if (await audioRecorder.isRecording()) await audioRecorder.stop();
+      } catch (_) {}
+      return null;
+    }
+  }
+
+  // عند تأكيد الخطر في الخلفية: نفتح جلسة SOS حقيقية (أو وهمية عند تعذّر السيرفر)
+  // ثم نفعّلها لبدء بث الموقع وتسجيل الأدلة — نفس مسار الـ SOS اليدوي تماماً.
+  Future<void> triggerAutoSos() async {
+    await _log('🚨 AI confirmed danger in background — auto-starting SOS.');
+    const SosService sos = SosService();
+    final session = await sos.startSession(triggerType: 'ai_auto');
+    if (session == null) {
+      await _log('❌ auto-SOS: could not open a session; will keep listening.');
+      return;
+    }
+    await activateSos(
+      newSosId: session.sosId,
+      newToken: session.token,
+      newShareLocation: true,
+      newRecordAudio: true,
+    );
+  }
+
+  // حلقة المراقبة المستمرة قبل الـ SOS. تعمل فقط عندما يكون التطبيق في الخلفية
+  // (مراقبُ الواجهة يملك المايك عند فتح التطبيق) ولا توجد جلسة SOS نشطة. تنفّذ
+  // نفس خط الأنابيب ذي المرحلتين، وعند التأكيد تُطلق الـ SOS تلقائياً.
+  Future<void> preSosMonitorLoop() async {
+    await _log('👂 Pre-SOS background monitor active (continuous).');
+    final prefs = await SharedPreferences.getInstance();
+    while (true) {
+      try {
+        await prefs.reload();
+        final bool sosActive = prefs.getBool(kSosActiveKey) ?? false;
+        // الافتراضي true: حتى أول مرة يُؤكَّد فيها أن التطبيق في الخلفية لا نستمع،
+        // فيبقى المايك لمراقب الواجهة عند الإقلاع/التشغيل في المقدمة.
+        final bool appForeground = prefs.getBool(kAppForegroundKey) ?? true;
+        final bool aiOn = prefs.getBool(kAiAutoModeKey) ?? true;
+        final bool micGranted = await Permission.microphone.isGranted;
+
+        // نستمع فقط عندما: التطبيق في الخلفية، ولا SOS نشط، والوضع التلقائي مفعّل،
+        // والمايك مسموح.
+        if (sosActive || appForeground || !aiOn || !micGranted) {
+          await Future.delayed(const Duration(seconds: 2));
+          continue;
+        }
+
+        // احترام المناطق الآمنة التي عرّفها المستخدم (كما في مراقب الواجهة).
+        if (lastLat != null &&
+            lastLng != null &&
+            await isInsideSafeZone(lastLat!, lastLng!)) {
+          await Future.delayed(const Duration(seconds: 3));
+          continue;
+        }
+
+        // المرحلة 1 — نافذة استماع قصيرة وفحص كلمات الخطر.
+        final String? clip = await recordListenClip(kListenWindow);
+        if (clip == null) {
+          await Future.delayed(const Duration(seconds: 1));
+          continue;
+        }
+        final bool danger =
+            await screenForDanger(clip, locationText: lastLocationText);
+        try {
+          final f = File(clip);
+          if (await f.exists()) await f.delete();
+        } catch (_) {}
+        if (!danger) continue;
+
+        // تأكّد أننا ما زلنا نملك المايك قبل المرحلة الثقيلة.
+        await prefs.reload();
+        if ((prefs.getBool(kSosActiveKey) ?? false) ||
+            (prefs.getBool(kAppForegroundKey) ?? false)) {
+          continue;
+        }
+
+        // إيقاف كشف المشاعر => كلمة خطر تُطلق الـ SOS مباشرة.
+        final bool emotionEnabled =
+            prefs.getBool(kEmotionDetectionKey) ?? true;
+        if (!emotionEnabled) {
+          await _log('🚨 Danger word detected in background (emotion off).');
+          await triggerAutoSos();
+          continue;
+        }
+
+        // المرحلة 2 — مقطع دليل (دقيقتان) + نموذج المشاعر (القرار النهائي).
+        await _log('🔎 Danger word hit in background — confirming with emotion.');
+        final String? evidence = await recordListenClip(kAiChunkDuration);
+        if (evidence == null) continue;
+        await uploadRecordingToBackend(evidence); // ما قبل الـ SOS => مسار المراقبة
+        final bool confirmed = await confirmEmotion(evidence);
+        try {
+          final f = File(evidence);
+          if (await f.exists()) await f.delete();
+        } catch (_) {}
+
+        if (confirmed) {
+          await triggerAutoSos();
+        } else {
+          await _log('🤖 Emotion model did not confirm; staying in listen mode.');
+        }
+      } catch (e) {
+        await _log('❌ pre-SOS monitor loop error: $e');
+        await Future.delayed(const Duration(seconds: 2));
+      }
+    }
+  }
 
   // بث الموقع المباشر وتسجيله في الخلفية أثناء عمل الـ SOS.
   locationSub = Geolocator.getPositionStream(
@@ -214,6 +376,8 @@ void onStart(ServiceInstance service) async {
     ),
   ).listen((pos) async {
     lastLocationText = '${pos.latitude}, ${pos.longitude}';
+    lastLat = pos.latitude;
+    lastLng = pos.longitude;
 
     // قبل بدء الـ SOS أو عند إيقاف مشاركة الموقع: طباعة خفيفة فقط (بدون حفظ)
     // لتفادي إغراق السجل الدائم بنقاط الخمول.
@@ -276,6 +440,10 @@ void onStart(ServiceInstance service) async {
     await audioRecorder.dispose();
     service.stopSelf();
   });
+
+  // إطلاق حلقة المراقبة المستمرة قبل الـ SOS — تستمع للخطر بينما التطبيق في
+  // الخلفية وتطلق الـ SOS تلقائياً عند التأكيد. لا ننتظرها (حلقة لا نهائية).
+  unawaited(preSosMonitorLoop());
 }
 
 /// Best-effort upload of the captured background log to the backend so the

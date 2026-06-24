@@ -68,6 +68,7 @@ class _HomeScreenState extends State<HomeScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _setAppForeground(true);
     _waveController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 2),
@@ -80,6 +81,7 @@ class _HomeScreenState extends State<HomeScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _setAppForeground(false);
     _loopActive = false;
     _positionSub?.cancel();
     _audioRecorder.dispose();
@@ -93,11 +95,27 @@ class _HomeScreenState extends State<HomeScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      // App is back in front: reclaim the mic from the background monitor.
+      _setAppForeground(true);
       _startMonitor();
-    } else if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive) {
+    } else if (state == AppLifecycleState.paused) {
+      // Truly backgrounded: release the mic and let the background isolate's
+      // pre-SOS monitor take over listening for danger.
+      _setAppForeground(false);
+      _stopMonitor();
+    } else if (state == AppLifecycleState.inactive) {
+      // Transient (system dialog / transition): release the mic but DON'T hand
+      // it to the background isolate — we're still in the foreground.
       _stopMonitor();
     }
+  }
+
+  /// Tells the background isolate whether the app is in the foreground so its
+  /// pre-SOS danger monitor only grabs the mic while the app is closed. See
+  /// [kAppForegroundKey].
+  Future<void> _setAppForeground(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(kAppForegroundKey, value);
   }
 
   // ---------------------------------------------------------------------------

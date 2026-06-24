@@ -20,7 +20,7 @@ dependencies:
   permission_handler: ^11.3.1
   http: ^1.6.0
   cupertino_icons: ^1.0.8
-  url_launcher: ^6.3.2
+  url_launcher:
   shared_preferences: ^2.5.4
   geocoding: ^4.0.0
   image_picker: ^1.2.1

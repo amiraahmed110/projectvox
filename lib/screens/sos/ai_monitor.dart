@@ -31,6 +31,15 @@ const String kAiAutoModeKey = 'ai_auto_mode_enabled';
 /// SOS directly.
 const String kEmotionDetectionKey = 'emotion_detection_enabled';
 
+/// SharedPreferences flag tracking whether the app is currently in the
+/// foreground. Written by the home screen's lifecycle observer (true on resume,
+/// false once truly backgrounded). The background isolate's pre-SOS danger
+/// monitor reads it so it only grabs the microphone while the app is closed,
+/// handing the mic back to the foreground monitor when the app is open. This
+/// mirrors the [kSosActiveKey] handshake — both prevent the two monitors from
+/// fighting over RECORD_AUDIO.
+const String kAppForegroundKey = 'app_in_foreground';
+
 /// SharedPreferences key for cached custom zones (shared with the map screen).
 /// Each entry is a JSON object: `{id, name, isDanger, lat, lng, radius}`.
 const String _kCustomZonesKey = 'user_custom_zones_local';
