@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:record/record.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'dart:ui' as ui;
 import 'emergency_screen.dart';
@@ -316,6 +317,13 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
+    // Foreground ("while using the app") location is granted at this point.
+    // Escalate to BACKGROUND location ("Allow all the time") — the background
+    // SOS guard and the always-on danger monitor need it to keep streaming GPS
+    // with the screen off. Android only grants it after foreground is granted,
+    // via a separate prompt / settings page.
+    await _ensureBackgroundLocation();
+
     try {
       final Position position = await Geolocator.getCurrentPosition();
       _onPosition(position, animate: true, forceGeocode: true);
@@ -329,6 +337,32 @@ class _HomeScreenState extends State<HomeScreen>
         distanceFilter: 20,
       ),
     ).listen((pos) => _onPosition(pos));
+  }
+
+  /// Requests BACKGROUND location ("Allow all the time"). On Android 11+ this
+  /// cannot share the foreground prompt, so `permission_handler` routes the
+  /// user to the system settings page. If it ends up denied we surface a
+  /// SnackBar with a shortcut to settings, since the background guard / monitor
+  /// can't stream location without it.
+  Future<void> _ensureBackgroundLocation() async {
+    try {
+      if (await Permission.locationAlways.isGranted) return;
+      final status = await Permission.locationAlways.request();
+      if (!status.isGranted && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text(
+              'Enable "Allow all the time" location so VoxGuard can keep '
+              'protecting you while the app is closed.',
+            ),
+            action: SnackBarAction(label: 'Settings', onPressed: openAppSettings),
+            duration: const Duration(seconds: 6),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('[HOME] background location request error: $e');
+    }
   }
 
   void _onPosition(Position position,
